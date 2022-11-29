@@ -15,7 +15,6 @@ import (
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/prometheus/prometheus/storage"
-	"github.com/prometheus/prometheus/tsdb/chunkenc"
 
 	"github.com/thanos-community/promql-engine/execution/function"
 	"github.com/thanos-community/promql-engine/execution/model"
@@ -131,10 +130,7 @@ func (o *matrixSelector) Next(ctx context.Context) ([]model.StepVector, error) {
 			}
 			maxt := seriesTs - o.offset
 			mint := maxt - o.selectRange
-			rangePoints, err := selectPoints(series.samples, mint, maxt, o.scanners[i].previousPoints)
-			if err != nil {
-				return nil, err
-			}
+			rangePoints := selectPoints(series.samples, mint, maxt, o.scanners[i].previousPoints)
 
 			// TODO(saswatamcode): Handle multi-arg functions for matrixSelectors.
 			// Also, allow operator to exist independently without being nested
@@ -220,8 +216,8 @@ func (o *matrixSelector) loadSeries(ctx context.Context) error {
 // values). Any such points falling before mint are discarded; points that fall
 // into the [mint, maxt] range are retained; only points with later timestamps
 // are populated from the iterator.
-// TODO(fpetkovski): Add max samples limit.
-func selectPoints(it *storage.BufferedSeriesIterator, mint, maxt int64, out []promql.Point) ([]promql.Point, error) {
+// TODO(fpetkovski): Add error handling and max samples limit.
+func selectPoints(it *storage.BufferedSeriesIterator, mint, maxt int64, out []promql.Point) []promql.Point {
 	if len(out) > 0 && out[len(out)-1].T >= mint {
 		// There is an overlap between previous and current ranges, retain common
 		// points. In most such cases:
@@ -239,43 +235,24 @@ func selectPoints(it *storage.BufferedSeriesIterator, mint, maxt int64, out []pr
 		out = out[:0]
 	}
 
-	soughtValueType := it.Seek(maxt)
-	if soughtValueType == chunkenc.ValNone {
-		if it.Err() != nil {
-			return nil, it.Err()
-		}
-	}
-
+	ok := it.Seek(maxt)
 	buf := it.Buffer()
-loop:
-	for {
-		switch buf.Next() {
-		case chunkenc.ValNone:
-			break loop
-		case chunkenc.ValFloatHistogram, chunkenc.ValHistogram:
-			return nil, ErrNativeHistogramsUnsupported
-		case chunkenc.ValFloat:
-			t, v := buf.At()
-			if value.IsStaleNaN(v) {
-				continue loop
-			}
-			// Values in the buffer are guaranteed to be smaller than maxt.
-			if t >= mint {
-				out = append(out, promql.Point{T: t, V: v})
-			}
+	for buf.Next() {
+		t, v := buf.At()
+		if value.IsStaleNaN(v) {
+			continue
+		}
+		// Values in the buffer are guaranteed to be smaller than maxt.
+		if t >= mint {
+			out = append(out, promql.Point{T: t, V: v})
 		}
 	}
-
-	// The sought sample might also be in the range.
-	switch soughtValueType {
-	case chunkenc.ValFloatHistogram, chunkenc.ValHistogram:
-		return nil, ErrNativeHistogramsUnsupported
-	case chunkenc.ValFloat:
+	// The seeked sample might also be in the range.
+	if ok {
 		t, v := it.At()
 		if t == maxt && !value.IsStaleNaN(v) {
 			out = append(out, promql.Point{T: t, V: v})
 		}
 	}
-
-	return out, nil
+	return out
 }
