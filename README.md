@@ -13,8 +13,8 @@ The following table shows operations which are currently supported by the engine
 | Type                   | Supported                                                                 | Priority |
 |------------------------|---------------------------------------------------------------------------|----------|
 | Binary expressions     | Full support                                                              |          |
-| Histogram quantile     | Partial support (no support for native histograms)                        | High     |
 | Aggregations           | Full support except for `count_values`                                    | Medium   |
+| Histogram quantile     | Full support                                                              |          |
 | Aggregations over time | Full support except for `absent_over_time` and `quantile_over_time`       | Medium   |
 | Functions              | Partial support (`clamp_min`, `clamp_max`, `changes` and `rate` variants) | Medium   |
 
