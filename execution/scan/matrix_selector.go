@@ -109,6 +109,10 @@ func (o *matrixSelector) GetPool() *model.VectorPool {
 	return o.vectorPool
 }
 
+func durationMilliseconds(d time.Duration) int64 {
+	return int64(d / (time.Millisecond / time.Nanosecond))
+}
+
 func (o *matrixSelector) Next(ctx context.Context) ([]model.StepVector, error) {
 	select {
 	case <-ctx.Done():
@@ -345,7 +349,7 @@ loop:
 func selectExtPoints(it *storage.BufferedSeriesIterator, mint, maxt int64, out []promql.Point, functionName string, extLookbackDelta int64, metricAppeared *int64) ([]promql.Point, error) {
 	extMint := mint - extLookbackDelta
 
-	if len(out) > 0 && out[len(out)-1].T >= mint {
+	if len(out) > 0 && out[len(out)-1].T >= extMint {
 		// There is an overlap between previous and current ranges, retain common
 		// points. In most such cases:
 		//   (a) the overlap is significantly larger than the eval step; and/or
@@ -357,7 +361,7 @@ func selectExtPoints(it *storage.BufferedSeriesIterator, mint, maxt int64, out [
 		for drop = 0; drop < len(out) && out[drop].T <= mint; drop++ {
 
 		}
-		// Then, go back one sample if within lookbackDelta of mint.
+		// Then, go back one sample if within extLookbackDelta of mint.
 		if drop > 0 && out[drop-1].T >= extMint {
 			drop--
 		}
