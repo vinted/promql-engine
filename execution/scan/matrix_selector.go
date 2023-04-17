@@ -32,12 +32,13 @@ type matrixScanner struct {
 }
 
 type matrixSelector struct {
-	funcExpr *parser.Call
-	storage  engstore.SeriesSelector
-	call     function.FunctionCall
-	scanners []matrixScanner
-	series   []labels.Labels
-	once     sync.Once
+	funcExpr       *parser.Call
+	storage        engstore.SeriesSelector
+	call           function.FunctionCall
+	scanners       []matrixScanner
+	metricAppeared []int64
+	series         []labels.Labels
+	once           sync.Once
 
 	vectorPool *model.VectorPool
 
@@ -108,6 +109,10 @@ func (o *matrixSelector) GetPool() *model.VectorPool {
 	return o.vectorPool
 }
 
+func durationMilliseconds(d time.Duration) int64 {
+	return int64(d / (time.Millisecond / time.Nanosecond))
+}
+
 func (o *matrixSelector) Next(ctx context.Context) ([]model.StepVector, error) {
 	select {
 	case <-ctx.Done():
@@ -142,7 +147,7 @@ func (o *matrixSelector) Next(ctx context.Context) ([]model.StepVector, error) {
 			var err error
 
 			if function.IsExtFunction(o.funcExpr.Func.Name) {
-				rangePoints, err = selectExtPoints(series.samples, mint, maxt, o.scanners[i].previousPoints, o.funcExpr.Func.Name, o.extLookbackDelta)
+				rangePoints, err = selectExtPoints(series.samples, mint, maxt, o.scanners[i].previousPoints, o.funcExpr.Func.Name, o.extLookbackDelta, &o.metricAppeared[i])
 			} else {
 				rangePoints, err = selectPoints(series.samples, mint, maxt, o.scanners[i].previousPoints)
 			}
@@ -155,13 +160,14 @@ func (o *matrixSelector) Next(ctx context.Context) ([]model.StepVector, error) {
 			// Also, allow operator to exist independently without being nested
 			// under parser.Call by implementing new data model.
 			// https://github.com/thanos-community/promql-engine/issues/39
-			result := o.call(function.FunctionArgs{
-				Labels:      series.labels,
-				Points:      rangePoints,
-				StepTime:    seriesTs,
-				SelectRange: o.selectRange,
-				Offset:      o.offset,
-			})
+			fa := function.NewFunctionsArgs()
+			fa.Labels = series.labels
+			fa.Points = rangePoints
+			fa.StepTime = seriesTs
+			fa.SelectRange = o.selectRange
+			fa.Offset = o.offset
+			fa.MetricAppeared = o.metricAppeared[i]
+			result := o.call(fa)
 
 			if result.Point != function.InvalidSample.Point {
 				vectors[currStep].T = result.T
@@ -204,6 +210,10 @@ func (o *matrixSelector) loadSeries(ctx context.Context) error {
 		}
 
 		o.scanners = make([]matrixScanner, len(series))
+		o.metricAppeared = make([]int64, len(series))
+		for i := range o.metricAppeared {
+			o.metricAppeared[i] = -1
+		}
 		o.series = make([]labels.Labels, len(series))
 		for i, s := range series {
 			lbls := s.Labels()
@@ -336,10 +346,10 @@ loop:
 // into the [mint, maxt] range are retained; only points with later timestamps
 // are populated from the iterator.
 // TODO(fpetkovski): Add max samples limit.
-func selectExtPoints(it *storage.BufferedSeriesIterator, mint, maxt int64, out []promql.Point, functionName string, extLookbackDelta int64) ([]promql.Point, error) {
+func selectExtPoints(it *storage.BufferedSeriesIterator, mint, maxt int64, out []promql.Point, functionName string, extLookbackDelta int64, metricAppeared *int64) ([]promql.Point, error) {
 	extMint := mint - extLookbackDelta
 
-	if len(out) > 0 && out[len(out)-1].T >= mint {
+	if len(out) > 0 && out[len(out)-1].T >= extMint {
 		// There is an overlap between previous and current ranges, retain common
 		// points. In most such cases:
 		//   (a) the overlap is significantly larger than the eval step; and/or
@@ -351,7 +361,7 @@ func selectExtPoints(it *storage.BufferedSeriesIterator, mint, maxt int64, out [
 		for drop = 0; drop < len(out) && out[drop].T <= mint; drop++ {
 
 		}
-		// Then, go back one sample if within lookbackDelta of mint.
+		// Then, go back one sample if within extLookbackDelta of mint.
 		if drop > 0 && out[drop-1].T >= extMint {
 			drop--
 		}
@@ -382,6 +392,9 @@ loop:
 			break loop
 		case chunkenc.ValHistogram:
 			t, h := buf.AtHistogram()
+			if *metricAppeared == -1 {
+				*metricAppeared = t
+			}
 			if t >= mint {
 				out = append(out, promql.Point{T: t, H: h.ToFloat()})
 			}
@@ -390,6 +403,9 @@ loop:
 			if value.IsStaleNaN(fh.Sum) {
 				continue loop
 			}
+			if *metricAppeared == -1 {
+				*metricAppeared = t
+			}
 			if t >= mint {
 				out = append(out, promql.Point{T: t, H: fh})
 			}
@@ -397,6 +413,9 @@ loop:
 			t, v := buf.At()
 			if value.IsStaleNaN(v) {
 				continue loop
+			}
+			if *metricAppeared == -1 {
+				*metricAppeared = t
 			}
 
 			// This is the argument to an extended range function: if any point
